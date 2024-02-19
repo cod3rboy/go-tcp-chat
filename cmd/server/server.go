@@ -32,8 +32,8 @@ func NewChatServer() (*App, error) {
 	}
 	tcpListener, _ := listener.(*net.TCPListener)
 
-	errorLog := log.New(os.Stdout, "ERROR", log.Ldate|log.Ltime|log.Llongfile)
-	infoLog := log.New(os.Stdout, "INFO", log.Ldate|log.Ltime)
+	errorLog := log.New(os.Stdout, "ERROR: ", log.Ldate|log.Ltime|log.Llongfile)
+	infoLog := log.New(os.Stdout, "INFO: ", log.Ldate|log.Ltime)
 
 	return &App{
 		listener:       tcpListener,
