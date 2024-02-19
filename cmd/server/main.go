@@ -1,12 +1,28 @@
 package main
 
-import "log"
+import (
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+)
 
 func main() {
-	app, err := createServer()
+	exitSignal := make(chan os.Signal, 1)
+	signal.Notify(exitSignal, syscall.SIGTERM|syscall.SIGINT|syscall.SIGHUP)
+	app, err := NewChatServer()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	app.Serve()
+	app.GoServe()
+
+	// wait for exit signal
+	<-exitSignal
+
+	// stop server
+	app.Stop()
+
+	fmt.Println("application gracefully terminated")
 }

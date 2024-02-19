@@ -8,9 +8,10 @@ import (
 )
 
 type ChatClient struct {
-	conn   *net.TCPConn
-	reader *bufio.Reader
-	writer *bufio.Writer
+	Username string
+	conn     *net.TCPConn
+	reader   *bufio.Reader
+	writer   *bufio.Writer
 }
 
 func NewChatClient(conn *net.TCPConn) *ChatClient {

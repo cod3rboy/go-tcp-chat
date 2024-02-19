@@ -31,6 +31,17 @@ func main() {
 		return
 	}
 	fmt.Println(welcomeMsg)
+
+	if err := assignClientUsername(client); err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	renderIncomingMessages(client)
+	promptListen(client)
+}
+
+func assignClientUsername(client *ChatClient) error {
 	reader := bufio.NewReader(os.Stdin)
 	username := ""
 	for {
@@ -38,20 +49,22 @@ func main() {
 		line, _ := reader.ReadString('\n')
 		username = strings.TrimSpace(line)
 		if err := client.SendMessage(username); err != nil {
-			log.Println(err)
-			return
+			return err
 		}
 		msg, err := client.GetMessage()
 		if err != nil {
-			fmt.Println(err)
-			return
+			return err
 		}
 		if msg == "OK" {
 			break
 		}
 		fmt.Println("choose different username!")
 	}
+	client.Username = username
+	return nil
+}
 
+func renderIncomingMessages(client *ChatClient) {
 	go func() {
 		messages := make([]common.Message, 0)
 		for {
@@ -59,7 +72,7 @@ func main() {
 			for _, message := range messages {
 				fmt.Printf("[%s]: %s\n", message.User, message.Body)
 			}
-			fmt.Printf("[%s] Enter Message: ", username)
+			fmt.Printf("[%s] Enter Message (\\q to quit): ", client.Username)
 
 			// wait for incoming message
 			msgEncoded, err := client.GetMessage()
@@ -73,10 +86,17 @@ func main() {
 			messages = append(messages, message)
 		}
 	}()
+}
 
+func promptListen(client *ChatClient) {
+	reader := bufio.NewReader(os.Stdin)
 	for {
 		msg, _ := reader.ReadString('\n')
 		msg = strings.TrimSpace(msg)
+		if strings.HasPrefix(strings.ToLower(msg), "\\q") {
+			// quit
+			break
+		}
 		if err := client.SendMessage(msg); err != nil {
 			break
 		}

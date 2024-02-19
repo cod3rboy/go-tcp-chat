@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/cod3rboy/go-tcp-chat/common"
@@ -15,131 +16,141 @@ const (
 )
 
 type App struct {
-	listener         net.Listener
-	ErrorLog         *log.Logger
-	InfoLog          *log.Logger
-	UsernameChan     chan UsernameValidation
-	AddClientChan    chan *Client
-	RemoveClientChan chan *Client
-	MessageChan      chan common.Message
+	listener       *net.TCPListener
+	ErrorLog       *log.Logger
+	InfoLog        *log.Logger
+	ChatManager    *ChatManager
+	wg             sync.WaitGroup
+	connectionChan chan *net.TCPConn
+	doneChan       chan bool
 }
 
-func createServer() (*App, error) {
+func NewChatServer() (*App, error) {
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return nil, err
 	}
+	tcpListener, _ := listener.(*net.TCPListener)
 
 	errorLog := log.New(os.Stdout, "ERROR", log.Ldate|log.Ltime|log.Llongfile)
 	infoLog := log.New(os.Stdout, "INFO", log.Ldate|log.Ltime)
 
 	return &App{
-		listener:         listener,
-		ErrorLog:         errorLog,
-		InfoLog:          infoLog,
-		UsernameChan:     make(chan UsernameValidation),
-		AddClientChan:    make(chan *Client),
-		RemoveClientChan: make(chan *Client),
-		MessageChan:      make(chan common.Message),
+		listener:       tcpListener,
+		ErrorLog:       errorLog,
+		InfoLog:        infoLog,
+		ChatManager:    NewChatManager(),
+		doneChan:       make(chan bool),
+		connectionChan: make(chan *net.TCPConn),
 	}, nil
 }
 
-func (app *App) Serve() {
-	// Set chat manager
-	go app.clientManager()
-	// Wait for each incoming client connection
-	for {
-		// accept the connection
-		conn, err := app.listener.Accept()
-		if err != nil {
-			app.ErrorLog.Println("incoming connection error: ", err)
-			continue
+func (app *App) GoServe() {
+	app.wg.Add(1)
+	go func() {
+		app.ChatManager.Start()
+
+		defer func() {
+			close(app.doneChan)
+			close(app.connectionChan)
+			app.wg.Done()
+		}()
+
+		app.wg.Add(1)
+		// wait for connections
+		go func() {
+			defer app.wg.Done()
+			for {
+				tcpConn, err := app.listener.AcceptTCP()
+				if err != nil {
+					app.ErrorLog.Println("error accepting connection: ", err)
+					return
+				}
+				app.connectionChan <- tcpConn
+			}
+		}()
+
+		connections := make(map[*net.TCPConn]bool, 0)
+		handlersWg := sync.WaitGroup{}
+		for {
+			select {
+			case connection := <-app.connectionChan:
+				// handle new connection
+				handlersWg.Add(1)
+				connections[connection] = true
+				go func() { // handler goroutine
+					defer handlersWg.Done()
+					app.handleConnection(connection)
+					delete(connections, connection)
+				}()
+			case <-app.doneChan:
+				app.listener.Close()
+				for connection := range connections {
+					// this will also finish active handler goroutines
+					connection.Close()
+				}
+				handlersWg.Wait()
+				app.ChatManager.Stop()
+				return
+			}
 		}
-		// convert to TCP connection
-		tcpConn, ok := conn.(*net.TCPConn)
-		if !ok {
-			app.ErrorLog.Println("failed to obtain TCP connection: ", err)
-			continue
-		}
-		// serve connection on new goroutine
-		go app.connectionHandler(tcpConn)
-	}
+	}()
 }
 
-func (app *App) connectionHandler(conn *net.TCPConn) {
-	client, err := app.handshake(conn)
+func (app *App) Stop() {
+	app.doneChan <- true
+	app.wg.Wait()
+}
+
+func (app *App) handleConnection(conn *net.TCPConn) {
+	participant, err := app.handshake(conn)
 	if err != nil {
 		app.ErrorLog.Println("client handshake failed:", err)
 		return
 	}
-	app.InfoLog.Println("new client connected:", client.ID)
-	app.AddClientChan <- client
-	defer client.Close()
+
+	app.InfoLog.Println("new client connected:", participant.ID)
+	app.ChatManager.AddParticipant(participant)
+	defer participant.Close()
+
 	for {
-		msg, err := client.GetMessage()
+		msg, err := participant.GetMessage()
 		if err != nil {
 			app.ErrorLog.Println(err)
 			break
 		}
-		app.MessageChan <- common.Message{
-			User:      client.ID,
+		app.ChatManager.BroadcastMessage(common.Message{
+			User:      participant.ID,
 			Timestamp: time.Now(),
 			Body:      msg,
-		}
+		})
 	}
-	app.InfoLog.Println("client", client.ID, "has disconnected")
-	app.RemoveClientChan <- client
+
+	app.InfoLog.Println("participant ", participant.ID, "has disconnected")
+	app.ChatManager.RemoveParticipant(participant)
 }
 
-func (app *App) handshake(conn *net.TCPConn) (*Client, error) {
-	client := NewClient(conn)
-	if err := client.SendMessage("Welcome to the TCP Chat Server"); err != nil {
+func (app *App) handshake(conn *net.TCPConn) (*Participant, error) {
+	participant := NewParticipant(conn)
+	if err := participant.SendMessage("Welcome to the TCP Chat Server"); err != nil {
 		return nil, err
 	}
 	for {
-		username, err := client.GetMessage()
+		username, err := participant.GetMessage()
 		if err != nil {
 			return nil, err
 		}
-		validation := UsernameValidation{
-			Username:  username,
-			ValidChan: make(chan bool),
-		}
-		app.UsernameChan <- validation
-		isValid := <-validation.ValidChan
-		if isValid {
-			client.ID = username
-			if err := client.SendMessage("OK"); err != nil {
+		if !app.ChatManager.UsernameExists(username) {
+			participant.ID = username
+			if err := participant.SendMessage("OK"); err != nil {
 				return nil, err
 			}
 			// handshake complete
 			break
 		}
-		if err := client.SendMessage("FAIL"); err != nil {
+		if err := participant.SendMessage("FAIL"); err != nil {
 			return nil, err
 		}
 	}
-	return client, nil
-}
-
-func (app *App) clientManager() {
-	clients := make(map[string]*Client)
-	for {
-		select {
-		case client := <-app.AddClientChan:
-			clients[client.ID] = client
-
-		case client := <-app.RemoveClientChan:
-			delete(clients, client.ID)
-
-		case validation := <-app.UsernameChan:
-			_, usernameExists := clients[validation.Username]
-			validation.ValidChan <- !usernameExists
-
-		case msg := <-app.MessageChan:
-			for _, client := range clients {
-				client.SendMessage(msg.Encode())
-			}
-		}
-	}
+	return participant, nil
 }
