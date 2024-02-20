@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	conn, err := net.Dial("tcp", ":4000")
+	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", *host, *port))
 	if err != nil {
 		log.Fatalln("failed to connect with chat server: ", err)
 	}
